@@ -92,8 +92,8 @@
 
                 <!-- Weights Control -->
                 <div class="space-y-6">
-                    <label class="block text-xs font-bold text-slate-500 uppercase tracking-widest italic mb-2">2. Prioritas Kriteria (1-5)</label>
-                    
+                    <label class="block text-xs font-bold text-slate-500 uppercase tracking-widest italic mb-2">2. Kriteria, Arah &amp; Prioritas (1-5)</label>
+
                     <script>
                         const items = [
                             { id: 'c1', name: 'Scopus Quality' },
@@ -103,14 +103,24 @@
                             { id: 'c5', name: 'Author H-Index' },
                             { id: 'c6', name: 'Author SINTA Score' }
                         ];
+                        const activeBtnClass = 'flex-1 text-[9px] font-black uppercase tracking-wider py-1 rounded-md border transition-colors bg-slate-900 text-white border-slate-900';
+                        const inactiveBtnClass = 'flex-1 text-[9px] font-black uppercase tracking-wider py-1 rounded-md border transition-colors bg-white text-slate-400 border-slate-200';
                         items.forEach(c => {
                             document.write(`
-                                <div class="group">
+                                <div class="group" data-criterion="${c.id}">
                                     <div class="flex justify-between items-center mb-1.5">
-                                        <label class="text-xs font-bold text-slate-700">${c.name}</label>
+                                        <label class="flex items-center gap-2 text-xs font-bold text-slate-700 cursor-pointer">
+                                            <input type="checkbox" id="enable_${c.id}" checked onchange="toggleCriterion('${c.id}')" class="rounded border-slate-300 text-brand-600 focus:ring-brand-500">
+                                            ${c.name}
+                                        </label>
                                         <span id="val_${c.id}" class="text-[10px] font-bold bg-slate-900 text-white py-0.5 px-2 rounded">3</span>
                                     </div>
                                     <input type="range" id="w_${c.id}" min="1" max="5" value="3" oninput="document.getElementById('val_${c.id}').innerText = this.value">
+                                    <input type="hidden" id="dir_${c.id}" value="benefit">
+                                    <div class="flex items-center gap-2 mt-2">
+                                        <button type="button" id="btn_${c.id}_benefit" onclick="setDirection('${c.id}','benefit')" class="${activeBtnClass}">Benefit</button>
+                                        <button type="button" id="btn_${c.id}_cost" onclick="setDirection('${c.id}','cost')" class="${inactiveBtnClass}">Cost</button>
+                                    </div>
                                 </div>
                             `);
                         });
@@ -188,6 +198,21 @@
 
     <!-- Scripting -->
     <script>
+        function toggleCriterion(id) {
+            const enabled = document.getElementById(`enable_${id}`).checked;
+            const container = document.querySelector(`[data-criterion="${id}"]`);
+            container.querySelectorAll('input[type=range], button').forEach(el => el.disabled = !enabled);
+            container.style.opacity = enabled ? '1' : '0.4';
+        }
+
+        function setDirection(id, direction) {
+            document.getElementById(`dir_${id}`).value = direction;
+            const activeBtnClass = 'flex-1 text-[9px] font-black uppercase tracking-wider py-1 rounded-md border transition-colors bg-slate-900 text-white border-slate-900';
+            const inactiveBtnClass = 'flex-1 text-[9px] font-black uppercase tracking-wider py-1 rounded-md border transition-colors bg-white text-slate-400 border-slate-200';
+            document.getElementById(`btn_${id}_benefit`).className = direction === 'benefit' ? activeBtnClass : inactiveBtnClass;
+            document.getElementById(`btn_${id}_cost`).className = direction === 'cost' ? activeBtnClass : inactiveBtnClass;
+        }
+
         async function fetchRecommendations() {
             const keywordInput = document.getElementById('searchKeyword').value;
             const loading = document.getElementById('loading');
@@ -209,14 +234,28 @@
             errorMessage.classList.add('hidden');
             emptyState.classList.add('hidden'); // Sembunyikan empty state saat kalkulasi
 
+            const allCriteria = ['c1', 'c2', 'c3', 'c4', 'c5', 'c6'];
+            const criteria = allCriteria.filter(id => document.getElementById(`enable_${id}`).checked);
+
+            if (criteria.length === 0) {
+                loading.classList.add('hidden');
+                errorMessage.classList.remove('hidden');
+                document.getElementById('errorText').innerText = "Minimal satu kriteria harus aktif.";
+                return;
+            }
+
+            const weights = {};
+            const directions = {};
+            criteria.forEach(id => {
+                weights[id] = parseInt(document.getElementById(`w_${id}`).value);
+                directions[id] = document.getElementById(`dir_${id}`).value;
+            });
+
             const payload = {
                 keyword: keywordInput,
-                weight_c1: parseInt(document.getElementById('w_c1').value),
-                weight_c2: parseInt(document.getElementById('w_c2').value),
-                weight_c3: parseInt(document.getElementById('w_c3').value),
-                weight_c4: parseInt(document.getElementById('w_c4').value),
-                weight_c5: parseInt(document.getElementById('w_c5').value),
-                weight_c6: parseInt(document.getElementById('w_c6').value)
+                criteria: criteria,
+                weights: weights,
+                directions: directions
             };
 
             try {
