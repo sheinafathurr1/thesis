@@ -3,6 +3,7 @@
 use Illuminate\Http\Request;
 use App\Http\Controllers\AuthorController;
 use App\Http\Controllers\TopsisController;
+use App\Http\Controllers\BaselineTopsisController;
 use Illuminate\Support\Facades\Route;
 
 Route::get('/user', function (Request $request) {
@@ -24,3 +25,6 @@ Route::prefix('v3/{env}/{uniq}')->group(function () {
 
 // 2. Endpoint API Gateway TOPSIS
 Route::post('topsis/recommendation', [TopsisController::class, 'generateSlrRecommendation']);
+
+// 3. Endpoint pembanding: TOPSIS Data-to-Compute (baseline)
+Route::post('topsis/baseline-recommendation', [BaselineTopsisController::class, 'generateSlrRecommendation']);
