@@ -22,20 +22,43 @@ class TopsisController extends Controller
     }
 
         // =====================================================================
-        // LANGKAH 1: Tangkap Bobot dari User dan Lakukan Normalisasi Bobot
+        // LANGKAH 1: Tangkap Kriteria Aktif, Arah, dan Bobot dari User
         // =====================================================================
-        $weights = [
-            'c1' => $request->input('weight_c1', 1), // Kualitas Global (Scopus)
-            'c2' => $request->input('weight_c2', 1), // Kualitas Nasional (SINTA)
-            'c3' => $request->input('weight_c3', 1), // Jumlah Sitasi
-            'c4' => $request->input('weight_c4', 1), // Kemutakhiran Tahun
-            'c5' => $request->input('weight_c5', 1), // Kinerja Penulis Global
-            'c6' => $request->input('weight_c6', 1), // Kinerja Penulis Nasional
-        ];
+        $allCriteria = ['c1', 'c2', 'c3', 'c4', 'c5', 'c6'];
 
+        // Kriteria aktif: default = keenam kriteria (kompatibel-mundur)
+        $requestedCriteria = $request->input('criteria', $allCriteria);
+        $criteria = is_array($requestedCriteria)
+            ? array_values(array_intersect($requestedCriteria, $allCriteria))
+            : $allCriteria;
+        if (empty($criteria)) {
+            $criteria = $allCriteria;
+        }
+
+        // Arah tiap kriteria: default = "benefit"
+        $requestedDirections = $request->input('directions', []);
+        $directions = [];
+        foreach ($criteria as $c) {
+            $dir = is_array($requestedDirections) ? ($requestedDirections[$c] ?? 'benefit') : 'benefit';
+            $dir = strtolower($dir);
+            $directions[$c] = in_array($dir, ['benefit', 'cost']) ? $dir : 'benefit';
+        }
+
+        // Bobot: dukung "weights" (objek, baru) ATAU weight_c1..weight_c6 (lama)
+        $requestedWeights = $request->input('weights');
+        $weights = [];
+        foreach ($criteria as $c) {
+            if (is_array($requestedWeights) && array_key_exists($c, $requestedWeights)) {
+                $weights[$c] = (float) $requestedWeights[$c];
+            } else {
+                $weights[$c] = (float) $request->input("weight_{$c}", 1);
+            }
+        }
+
+        // Normalisasi HANYA atas kriteria yang aktif
         $totalWeight = array_sum($weights);
         $w = [];
-        
+
         // Mencegah error jika user memasukkan bobot 0 semua
         if ($totalWeight == 0) {
             return response()->json(['status' => 'error', 'message' => 'Total bobot tidak boleh nol.'], 400);
@@ -85,29 +108,35 @@ class TopsisController extends Controller
         $c5_sql = "IFNULL(a.scopus_hindex, 0)";
         $c6_sql = "IFNULL(a.sinta_score_author, 0)";
 
+        $criteriaSql = [
+            'c1' => $c1_sql, 'c2' => $c2_sql, 'c3' => $c3_sql,
+            'c4' => $c4_sql, 'c5' => $c5_sql, 'c6' => $c6_sql,
+        ];
+
         // =====================================================================
         // LANGKAH 4: QUERY AGREGASI - Minta MySQL Menghitung Matriks Dasar
         // =====================================================================
-        // Mencari Sum of Squares (untuk pembagi normalisasi) serta nilai Max & Min
+        // Mencari Sum of Squares (untuk pembagi normalisasi) serta nilai Max & Min,
+        // hanya untuk kriteria yang aktif
+        $aggregateParts = [];
+        foreach ($criteria as $c) {
+            $sql = $criteriaSql[$c];
+            $aggregateParts[] = "SUM(POW($sql, 2)) as sum_$c, MAX($sql) as max_$c, MIN($sql) as min_$c";
+        }
         $aggregateQuery = "
             SELECT
-                COUNT(p.id) as total_records, 
-                SUM(POW($c1_sql, 2)) as sum_c1, MAX($c1_sql) as max_c1, MIN($c1_sql) as min_c1,
-                SUM(POW($c2_sql, 2)) as sum_c2, MAX($c2_sql) as max_c2, MIN($c2_sql) as min_c2,
-                SUM(POW($c3_sql, 2)) as sum_c3, MAX($c3_sql) as max_c3, MIN($c3_sql) as min_c3,
-                SUM(POW($c4_sql, 2)) as sum_c4, MAX($c4_sql) as max_c4, MIN($c4_sql) as min_c4,
-                SUM(POW($c5_sql, 2)) as sum_c5, MAX($c5_sql) as max_c5, MIN($c5_sql) as min_c5,
-                SUM(POW($c6_sql, 2)) as sum_c6, MAX($c6_sql) as max_c6, MIN($c6_sql) as min_c6
+                COUNT(p.id) as total_records,
+                " . implode(",\n                ", $aggregateParts) . "
             FROM publications p
             JOIN authors a ON p.author_id = a.id
             $whereClause
         ";
-        
+
         // Eksekusi hanya 1 query super cepat untuk mendapatkan 1 baris hasil
         $agg = DB::selectOne($aggregateQuery, $bindings);
 
         // Jika tidak ada data sama sekali atau keyword tidak ditemukan
-        if (!$agg || $agg->sum_c1 === null) {
+        if (!$agg || $agg->{"sum_{$criteria[0]}"} === null) {
             return response()->json([
                 'status' => 'error', 
                 'message' => $keyword ? "Tidak ada publikasi yang cocok dengan kata kunci: '{$keyword}'." : "Database publikasi kosong."
@@ -119,56 +148,43 @@ class TopsisController extends Controller
         // =====================================================================
         // 5a. Hitung Denominator (Akar dari Sum of Squares)
         // Gunakan operator ternary untuk mencegah pembagian dengan 0
-        $denom = [
-            'c1' => $agg->sum_c1 > 0 ? sqrt($agg->sum_c1) : 1, 
-            'c2' => $agg->sum_c2 > 0 ? sqrt($agg->sum_c2) : 1,
-            'c3' => $agg->sum_c3 > 0 ? sqrt($agg->sum_c3) : 1, 
-            'c4' => $agg->sum_c4 > 0 ? sqrt($agg->sum_c4) : 1,
-            'c5' => $agg->sum_c5 > 0 ? sqrt($agg->sum_c5) : 1, 
-            'c6' => $agg->sum_c6 > 0 ? sqrt($agg->sum_c6) : 1,
-        ];
+        $denom = [];
+        foreach ($criteria as $c) {
+            $sumSq = $agg->{"sum_$c"};
+            $denom[$c] = $sumSq > 0 ? sqrt($sumSq) : 1;
+        }
 
         // 5b. Tentukan Solusi Ideal Positif (A+) dan Negatif (A-)
         // Rumus: (Nilai Asli / Pembagi) * Bobot
-        $idealPos = [
-            'c1' => ($agg->max_c1 / $denom['c1']) * $w['c1'], 
-            'c2' => ($agg->max_c2 / $denom['c2']) * $w['c2'],
-            'c3' => ($agg->max_c3 / $denom['c3']) * $w['c3'], 
-            'c4' => ($agg->max_c4 / $denom['c4']) * $w['c4'],
-            'c5' => ($agg->max_c5 / $denom['c5']) * $w['c5'], 
-            'c6' => ($agg->max_c6 / $denom['c6']) * $w['c6'],
-        ];
-
-        $idealNeg = [
-            'c1' => ($agg->min_c1 / $denom['c1']) * $w['c1'], 
-            'c2' => ($agg->min_c2 / $denom['c2']) * $w['c2'],
-            'c3' => ($agg->min_c3 / $denom['c3']) * $w['c3'], 
-            'c4' => ($agg->min_c4 / $denom['c4']) * $w['c4'],
-            'c5' => ($agg->min_c5 / $denom['c5']) * $w['c5'], 
-            'c6' => ($agg->min_c6 / $denom['c6']) * $w['c6'],
-        ];
+        // Untuk kriteria "cost", peran MAX/MIN ditukar (A+ pakai MIN, A- pakai MAX)
+        $idealPos = [];
+        $idealNeg = [];
+        foreach ($criteria as $c) {
+            $normMax = ($agg->{"max_$c"} / $denom[$c]) * $w[$c];
+            $normMin = ($agg->{"min_$c"} / $denom[$c]) * $w[$c];
+            if ($directions[$c] === 'cost') {
+                $idealPos[$c] = $normMin;
+                $idealNeg[$c] = $normMax;
+            } else {
+                $idealPos[$c] = $normMax;
+                $idealNeg[$c] = $normMin;
+            }
+        }
 
         // =====================================================================
         // LANGKAH 6: Susun Rumus Jarak (Euclidean) di dalam SQL
         // =====================================================================
-        // Menyuntikkan array statis dari PHP ke dalam sintaks perhitungan dinamis MySQL
-        $d_plus = "SQRT(
-            POW((($c1_sql / {$denom['c1']}) * {$w['c1']}) - {$idealPos['c1']}, 2) +
-            POW((($c2_sql / {$denom['c2']}) * {$w['c2']}) - {$idealPos['c2']}, 2) +
-            POW((($c3_sql / {$denom['c3']}) * {$w['c3']}) - {$idealPos['c3']}, 2) +
-            POW((($c4_sql / {$denom['c4']}) * {$w['c4']}) - {$idealPos['c4']}, 2) +
-            POW((($c5_sql / {$denom['c5']}) * {$w['c5']}) - {$idealPos['c5']}, 2) +
-            POW((($c6_sql / {$denom['c6']}) * {$w['c6']}) - {$idealPos['c6']}, 2)
-        )";
-
-        $d_minus = "SQRT(
-            POW((($c1_sql / {$denom['c1']}) * {$w['c1']}) - {$idealNeg['c1']}, 2) +
-            POW((($c2_sql / {$denom['c2']}) * {$w['c2']}) - {$idealNeg['c2']}, 2) +
-            POW((($c3_sql / {$denom['c3']}) * {$w['c3']}) - {$idealNeg['c3']}, 2) +
-            POW((($c4_sql / {$denom['c4']}) * {$w['c4']}) - {$idealNeg['c4']}, 2) +
-            POW((($c5_sql / {$denom['c5']}) * {$w['c5']}) - {$idealNeg['c5']}, 2) +
-            POW((($c6_sql / {$denom['c6']}) * {$w['c6']}) - {$idealNeg['c6']}, 2)
-        )";
+        // Menyuntikkan array statis dari PHP ke dalam sintaks perhitungan dinamis MySQL,
+        // hanya untuk kriteria yang aktif
+        $dPlusTerms = [];
+        $dMinusTerms = [];
+        foreach ($criteria as $c) {
+            $sql = $criteriaSql[$c];
+            $dPlusTerms[] = "POW((($sql / {$denom[$c]}) * {$w[$c]}) - {$idealPos[$c]}, 2)";
+            $dMinusTerms[] = "POW((($sql / {$denom[$c]}) * {$w[$c]}) - {$idealNeg[$c]}, 2)";
+        }
+        $d_plus = "SQRT(" . implode(" + ", $dPlusTerms) . ")";
+        $d_minus = "SQRT(" . implode(" + ", $dMinusTerms) . ")";
 
         // Nilai Preferensi (V)
         $v_score = "IF(($d_plus + $d_minus) > 0, $d_minus / ($d_plus + $d_minus), 0)";
@@ -218,6 +234,8 @@ class TopsisController extends Controller
         return response()->json([
             'status' => 'success',
             'execution_time_ms' => $executionTime,
+            'active_criteria' => $criteria,
+            'directions_used' => $directions,
             'user_weights' => $weights,
             'search_keyword' => $keyword,
             'total_found' => $agg->total_records, // Menambahkan total dokumen yang difilter
