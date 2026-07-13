@@ -106,7 +106,7 @@ class TopsisController extends Controller
         $c3_sql = "p.citation_count";
         
         // Skor Kemutakhiran: 10 - (Tahun_Sekarang - Tahun_Terbit). Minimal skor adalah 1.
-        $c4_sql = "GREATEST(10 - (YEAR(CURDATE()) - p.year), 1)";
+        $c4_sql = "GREATEST(10 - (YEAR(CURDATE()) - CAST(p.year AS SIGNED)), 1)";
         
         // Kinerja penulis, gunakan IFNULL agar tidak error jika relasi kosong
         $c5_sql = "IFNULL(a.scopus_hindex, 0)";
