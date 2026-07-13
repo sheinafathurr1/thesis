@@ -187,7 +187,7 @@ class TopsisController extends Controller
         $d_minus = "SQRT(" . implode(" + ", $dMinusTerms) . ")";
 
         // Nilai Preferensi (V)
-        $v_score = "IF(($d_plus + $d_minus) > 0, $d_minus / ($d_plus + $d_minus), 0)";
+        $v_score = "IF(($d_plus + $d_minus) > 0, $d_minus / ($d_plus + $d_minus), 0.5)";
 
         // =====================================================================
         // LANGKAH 7: QUERY EKSEKUSI AKHIR - Sorting dan Pengambilan Data
