@@ -14,6 +14,10 @@ class TopsisController extends Controller
     public function generateSlrRecommendation(Request $request)
     {
         $startTime = microtime(true);
+        if (function_exists('memory_reset_peak_usage')) {
+            memory_reset_peak_usage();
+        }
+        $memStart = memory_get_usage(true);
         if (!$request->filled('keyword')) {
         return response()->json([
             'status' => 'error',
@@ -229,11 +233,15 @@ class TopsisController extends Controller
         }, $results);
 
         $executionTime = round((microtime(true) - $startTime) * 1000, 2);
+        $peakMemory = memory_get_peak_usage(true);
 
         // Kembalikan sebagai JSON
         return response()->json([
             'status' => 'success',
             'execution_time_ms' => $executionTime,
+            'peak_memory_bytes' => $peakMemory,
+            'peak_memory_mb' => round($peakMemory / 1048576, 2),
+            'mem_delta_bytes' => $peakMemory - $memStart,
             'active_criteria' => $criteria,
             'directions_used' => $directions,
             'user_weights' => $weights,
