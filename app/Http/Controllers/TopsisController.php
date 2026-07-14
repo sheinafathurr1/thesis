@@ -18,12 +18,130 @@ class TopsisController extends Controller
             memory_reset_peak_usage();
         }
         $memStart = memory_get_usage(true);
-        if (!$request->filled('keyword')) {
+
+        $prepared = $this->prepareTopsis($request);
+        if ($prepared['error'] !== null) {
+            return $prepared['error'];
+        }
+
+        // =====================================================================
+        // QUERY EKSEKUSI AKHIR - Sorting dan Pengambilan Data
+        // =====================================================================
+        // Database akan menghitung skor TOPSIS untuk tiap baris, lalu hanya mengirim 20 terbaik ke PHP
+        $finalQuery = "
+            SELECT
+                p.id, p.title, p.doi, p.scopus_quartile, p.sinta_accreditation, p.citation_count, p.year,
+                a.scopus_hindex, a.sinta_score_author,
+                ({$prepared['v_score_sql']}) as topsis_score
+            FROM publications p
+            JOIN authors a ON p.author_id = a.id
+            {$prepared['where_clause']}
+            ORDER BY topsis_score DESC
+            LIMIT 20
+        ";
+
+        $results = DB::select($finalQuery, $prepared['bindings']);
+
+        // =====================================================================
+        // Formatting Data Response untuk Frontend
+        // =====================================================================
+        $formattedResults = array_map(function ($row) {
+            return [
+                'publication_id' => $row->id,
+                'title' => $row->title,
+                'doi' => $row->doi,
+                'metrics' => [
+                    'scopus_quartile' => $row->scopus_quartile,
+                    'sinta_accreditation' => $row->sinta_accreditation,
+                    'citations' => $row->citation_count,
+                    'year' => $row->year,
+                    'author_scopus_hindex' => $row->scopus_hindex,
+                    'author_sinta_score' => $row->sinta_score_author,
+                ],
+                'topsis_score' => round($row->topsis_score, 6)
+            ];
+        }, $results);
+
+        $executionTime = round((microtime(true) - $startTime) * 1000, 2);
+        $peakMemory = memory_get_peak_usage(true);
+
         return response()->json([
-            'status' => 'error',
-            'message' => 'Kata kunci (keyword) wajib diisi untuk melakukan analisis TOPSIS.'
-        ], 422); // 422 Unprocessable Entity
+            'status' => 'success',
+            'execution_time_ms' => $executionTime,
+            'peak_memory_bytes' => $peakMemory,
+            'peak_memory_mb' => round($peakMemory / 1048576, 2),
+            'mem_delta_bytes' => $peakMemory - $memStart,
+            'active_criteria' => $prepared['criteria'],
+            'directions_used' => $prepared['directions'],
+            'user_weights' => $prepared['weights'],
+            'search_keyword' => $prepared['keyword'],
+            'total_found' => $prepared['total_found'],
+            'displayed_count' => count($formattedResults),
+            'recommendations' => $formattedResults
+        ]);
     }
+
+    /**
+     * Endpoint VALIDASI: mengembalikan SELURUH kandidat (atau top-n via "limit") dengan
+     * skor presisi penuh (tanpa pembulatan), untuk dibandingkan dengan referensi TOPSIS
+     * kanonik (mis. skrip NumPy) di luar sistem ini.
+     */
+    public function validateScores(Request $request)
+    {
+        $prepared = $this->prepareTopsis($request);
+        if ($prepared['error'] !== null) {
+            return $prepared['error'];
+        }
+
+        $limit = (int) $request->input('limit', 0);
+        $limitClause = $limit > 0 ? "LIMIT {$limit}" : "";
+
+        $query = "
+            SELECT
+                p.id,
+                ({$prepared['v_score_sql']}) as topsis_score
+            FROM publications p
+            JOIN authors a ON p.author_id = a.id
+            {$prepared['where_clause']}
+            ORDER BY topsis_score DESC
+            {$limitClause}
+        ";
+
+        $results = DB::select($query, $prepared['bindings']);
+
+        $recommendations = array_map(function ($row) {
+            return [
+                'id' => $row->id,
+                'topsis_score' => (float) $row->topsis_score,
+            ];
+        }, $results);
+
+        return response()->json([
+            'status' => 'success',
+            'active_criteria' => $prepared['criteria'],
+            'directions_used' => $prepared['directions'],
+            'search_keyword' => $prepared['keyword'],
+            'total_found' => $prepared['total_found'],
+            'limit_applied' => $limit > 0 ? $limit : null,
+            'recommendations' => $recommendations,
+        ]);
+    }
+
+    /**
+     * Logika inti SQL-Driven TOPSIS yang dipakai bersama oleh generateSlrRecommendation
+     * dan validateScores: baca payload, tentukan kriteria/arah/bobot aktif, filter
+     * keyword, jalankan kueri agregat SUM(POW)/MAX/MIN, lalu susun ekspresi skor V.
+     * Mengembalikan ['error' => JsonResponse] jika input tidak valid, atau
+     * ['error' => null, ...] berisi bahan siap pakai untuk kueri final.
+     */
+    private function prepareTopsis(Request $request): array
+    {
+        if (!$request->filled('keyword')) {
+            return ['error' => response()->json([
+                'status' => 'error',
+                'message' => 'Kata kunci (keyword) wajib diisi untuk melakukan analisis TOPSIS.'
+            ], 422)];
+        }
 
         // =====================================================================
         // LANGKAH 1: Tangkap Kriteria Aktif, Arah, dan Bobot dari User
@@ -65,7 +183,7 @@ class TopsisController extends Controller
 
         // Mencegah error jika user memasukkan bobot 0 semua
         if ($totalWeight == 0) {
-            return response()->json(['status' => 'error', 'message' => 'Total bobot tidak boleh nol.'], 400);
+            return ['error' => response()->json(['status' => 'error', 'message' => 'Total bobot tidak boleh nol.'], 400)];
         }
 
         foreach ($weights as $k => $v) {
@@ -78,20 +196,20 @@ class TopsisController extends Controller
         $keyword = $request->input('keyword'); // Tetap gunakan $keyword agar bawahnya tidak error
         $whereClause = "";
         $bindings = [];
-        
+
         if (!empty($keyword)) {
             // Bersihkan input: ubah koma menjadi spasi, lalu hilangkan spasi ganda
             $cleanInput = trim(preg_replace('/[\s,]+/', ' ', $keyword));
-            
+
             // Pecah string menjadi array kata (tokenization)
             $keywordsArray = explode(' ', $cleanInput);
-            
+
             $conditions = [];
             foreach ($keywordsArray as $word) {
                 $conditions[] = "p.title LIKE ?";
                 $bindings[] = "%{$word}%";
             }
-            
+
             // Gabungkan semua kondisi dengan AND
             // Artinya: Semua kata kunci WAJIB ada di dalam judul (meskipun urutannya acak)
             $whereClause = "WHERE " . implode(' AND ', $conditions);
@@ -104,10 +222,11 @@ class TopsisController extends Controller
         $c1_sql = "CASE p.scopus_quartile WHEN 'Q1' THEN 4 WHEN 'Q2' THEN 3 WHEN 'Q3' THEN 2 WHEN 'Q4' THEN 1 ELSE 0 END";
         $c2_sql = "CASE p.sinta_accreditation WHEN 'S1' THEN 6 WHEN 'S2' THEN 5 WHEN 'S3' THEN 4 WHEN 'S4' THEN 3 WHEN 'S5' THEN 2 WHEN 'S6' THEN 1 ELSE 0 END";
         $c3_sql = "p.citation_count";
-        
+
         // Skor Kemutakhiran: 10 - (Tahun_Sekarang - Tahun_Terbit). Minimal skor adalah 1.
+        // CAST ke SIGNED agar tidak kena promosi aritmetika unsigned dari kolom YEAR.
         $c4_sql = "GREATEST(10 - (YEAR(CURDATE()) - CAST(p.year AS SIGNED)), 1)";
-        
+
         // Kinerja penulis, gunakan IFNULL agar tidak error jika relasi kosong
         $c5_sql = "IFNULL(a.scopus_hindex, 0)";
         $c6_sql = "IFNULL(a.sinta_score_author, 0)";
@@ -141,10 +260,10 @@ class TopsisController extends Controller
 
         // Jika tidak ada data sama sekali atau keyword tidak ditemukan
         if (!$agg || $agg->{"sum_{$criteria[0]}"} === null) {
-            return response()->json([
-                'status' => 'error', 
+            return ['error' => response()->json([
+                'status' => 'error',
                 'message' => $keyword ? "Tidak ada publikasi yang cocok dengan kata kunci: '{$keyword}'." : "Database publikasi kosong."
-            ], 404);
+            ], 404)];
         }
 
         // =====================================================================
@@ -179,13 +298,18 @@ class TopsisController extends Controller
         // LANGKAH 6: Susun Rumus Jarak (Euclidean) di dalam SQL
         // =====================================================================
         // Menyuntikkan array statis dari PHP ke dalam sintaks perhitungan dinamis MySQL,
-        // hanya untuk kriteria yang aktif
+        // hanya untuk kriteria yang aktif. Diformat presisi tinggi (%.17g) agar tidak
+        // kehilangan presisi saat dikonversi ke literal SQL.
         $dPlusTerms = [];
         $dMinusTerms = [];
         foreach ($criteria as $c) {
             $sql = $criteriaSql[$c];
-            $dPlusTerms[] = "POW((($sql / {$denom[$c]}) * {$w[$c]}) - {$idealPos[$c]}, 2)";
-            $dMinusTerms[] = "POW((($sql / {$denom[$c]}) * {$w[$c]}) - {$idealNeg[$c]}, 2)";
+            $denomFmt = $this->fmtScalar($denom[$c]);
+            $wFmt = $this->fmtScalar($w[$c]);
+            $idealPosFmt = $this->fmtScalar($idealPos[$c]);
+            $idealNegFmt = $this->fmtScalar($idealNeg[$c]);
+            $dPlusTerms[] = "POW((($sql / $denomFmt) * $wFmt) - $idealPosFmt, 2)";
+            $dMinusTerms[] = "POW((($sql / $denomFmt) * $wFmt) - $idealNegFmt, 2)";
         }
         $d_plus = "SQRT(" . implode(" + ", $dPlusTerms) . ")";
         $d_minus = "SQRT(" . implode(" + ", $dMinusTerms) . ")";
@@ -193,62 +317,26 @@ class TopsisController extends Controller
         // Nilai Preferensi (V)
         $v_score = "IF(($d_plus + $d_minus) > 0, $d_minus / ($d_plus + $d_minus), 0.5)";
 
-        // =====================================================================
-        // LANGKAH 7: QUERY EKSEKUSI AKHIR - Sorting dan Pengambilan Data
-        // =====================================================================
-        // Database akan menghitung skor TOPSIS untuk tiap baris, lalu hanya mengirim 20 terbaik ke PHP
-        $finalQuery = "
-            SELECT 
-                p.id, p.title, p.doi, p.scopus_quartile, p.sinta_accreditation, p.citation_count, p.year,
-                a.scopus_hindex, a.sinta_score_author,
-                ($v_score) as topsis_score
-            FROM publications p
-            JOIN authors a ON p.author_id = a.id
-            $whereClause
-            ORDER BY topsis_score DESC
-            LIMIT 20
-        ";
+        return [
+            'error' => null,
+            'v_score_sql' => $v_score,
+            'where_clause' => $whereClause,
+            'bindings' => $bindings,
+            'criteria' => $criteria,
+            'directions' => $directions,
+            'weights' => $weights,
+            'keyword' => $keyword,
+            'total_found' => $agg->total_records,
+        ];
+    }
 
-        // Bindings array dieksekusi lagi karena $whereClause digunakan kembali
-        $results = DB::select($finalQuery, $bindings);
-
-        // =====================================================================
-        // LANGKAH 8: Formatting Data Response untuk Frontend
-        // =====================================================================
-        $formattedResults = array_map(function($row) {
-            return [
-                'publication_id' => $row->id,
-                'title' => $row->title,
-                'doi' => $row->doi,
-                'metrics' => [
-                    'scopus_quartile' => $row->scopus_quartile,
-                    'sinta_accreditation' => $row->sinta_accreditation,
-                    'citations' => $row->citation_count,
-                    'year' => $row->year,
-                    'author_scopus_hindex' => $row->scopus_hindex,
-                    'author_sinta_score' => $row->sinta_score_author,
-                ],
-                'topsis_score' => round($row->topsis_score, 4)
-            ];
-        }, $results);
-
-        $executionTime = round((microtime(true) - $startTime) * 1000, 2);
-        $peakMemory = memory_get_peak_usage(true);
-
-        // Kembalikan sebagai JSON
-        return response()->json([
-            'status' => 'success',
-            'execution_time_ms' => $executionTime,
-            'peak_memory_bytes' => $peakMemory,
-            'peak_memory_mb' => round($peakMemory / 1048576, 2),
-            'mem_delta_bytes' => $peakMemory - $memStart,
-            'active_criteria' => $criteria,
-            'directions_used' => $directions,
-            'user_weights' => $weights,
-            'search_keyword' => $keyword,
-            'total_found' => $agg->total_records, // Menambahkan total dokumen yang difilter
-            'displayed_count' => count($formattedResults), // Menambahkan jumlah yang ditampilkan
-            'recommendations' => $formattedResults
-        ]);
+    /**
+     * Format skalar float sebagai literal SQL presisi penuh (17 digit signifikan
+     * cukup untuk round-trip lossless nilai double), menggantikan interpolasi
+     * string biasa yang tunduk pada setting precision PHP.
+     */
+    private function fmtScalar(float $value): string
+    {
+        return sprintf('%.17g', $value);
     }
 }
