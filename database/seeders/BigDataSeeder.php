@@ -24,7 +24,12 @@ class BigDataSeeder extends Seeder
      */
     public function run()
     {
-        $this->command->info('Memulai Stress Test Seeder...');
+        // Skala bisa dioverride lewat environment variable (mis. oleh orkestrator
+        // run_scaling.ps1) tanpa perlu mengedit file ini.
+        $numPublications = (int) env('SEED_PUBLICATIONS', self::NUM_PUBLICATIONS);
+        $numAuthors = (int) env('SEED_AUTHORS', intdiv($numPublications, 10));
+
+        $this->command->info("Memulai Stress Test Seeder... ({$numPublications} publikasi, {$numAuthors} author)");
 
         // Matikan pengecekan Foreign Key sementara agar proses truncate aman
         DB::statement('SET FOREIGN_KEY_CHECKS=0;');
@@ -53,9 +58,9 @@ class BigDataSeeder extends Seeder
         // ==========================================
         // 2. GENERATE AUTHORS
         // ==========================================
-        $this->command->info('Menyiapkan ' . self::NUM_AUTHORS . ' data Authors...');
+        $this->command->info('Menyiapkan ' . $numAuthors . ' data Authors...');
         $authors = [];
-        for ($i = 1; $i <= self::NUM_AUTHORS; $i++) {
+        for ($i = 1; $i <= $numAuthors; $i++) {
             $authors[] = [
                 'id' => $i,
                 'name' => 'Author ' . $i,
@@ -73,7 +78,7 @@ class BigDataSeeder extends Seeder
         // ==========================================
         // 3. GENERATE PUBLICATIONS
         // ==========================================
-        $this->command->info('Menyiapkan ' . self::NUM_PUBLICATIONS . ' data Publications (Mohon tunggu sebentar)...');
+        $this->command->info('Menyiapkan ' . $numPublications . ' data Publications (Mohon tunggu sebentar)...');
         $publications = [];
 
         $quartiles = ['Q1', 'Q2', 'Q3', 'Q4', null];
@@ -82,12 +87,12 @@ class BigDataSeeder extends Seeder
         // Sengaja kita siapkan beberapa keyword spesifik agar pencarian nanti ada hasilnya
         $keywords = ['Smart City', 'Machine Learning', 'Blockchain', 'Internet of Things', 'Algorithm', 'Data Mining', 'Cyber Security', 'Network', 'Software Engineering', 'Artificial Intelligence'];
 
-        for ($i = 1; $i <= self::NUM_PUBLICATIONS; $i++) {
+        for ($i = 1; $i <= $numPublications; $i++) {
             $randomKeyword = $keywords[array_rand($keywords)];
 
             $publications[] = [
                 'id' => $i,
-                'author_id' => rand(1, self::NUM_AUTHORS),
+                'author_id' => rand(1, $numAuthors),
                 'title' => 'Analysis of ' . $randomKeyword . ' using ' . Str::random(5) . ' framework',
                 'doi' => '10.' . rand(1000, 9999) . '/' . Str::random(8),
                 'scopus_quartile' => $quartiles[array_rand($quartiles)],
@@ -105,7 +110,7 @@ class BigDataSeeder extends Seeder
         // Nyalakan kembali Foreign Key
         DB::statement('SET FOREIGN_KEY_CHECKS=1;');
 
-        $this->command->info('SUKSES! ' . self::NUM_PUBLICATIONS . ' Publikasi, ' . self::NUM_AUTHORS . ' Author, dan ' . self::NUM_AFFILIATIONS . ' Affiliation berhasil ditambahkan.');
+        $this->command->info('SUKSES! ' . $numPublications . ' Publikasi, ' . $numAuthors . ' Author, dan ' . self::NUM_AFFILIATIONS . ' Affiliation berhasil ditambahkan.');
     }
 
     /**
